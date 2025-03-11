@@ -1,7 +1,7 @@
 <?php
 // config.php - Configuración de la base de datos y JWT
 
-// Buscar el archivo .env en varias ubicaciones posibles
+// Cargar variables de entorno
 $envFile = null;
 $possibleEnvPaths = [
     __DIR__ . '/.env',                      // Mismo directorio
@@ -21,52 +21,28 @@ foreach ($possibleEnvPaths as $path) {
 if ($envFile) {
     $lines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
     foreach ($lines as $line) {
-        // Ignorar comentarios
-        if (strpos(trim($line), '#') === 0) {
-            continue;
-        }
-
-        // Verificar que la línea tiene formato correcto
-        if (strpos($line, '=') !== false) {
-            list($name, $value) = explode('=', $line, 2);
-            $name = trim($name);
-            $value = trim($value);
-
-            // Quitar comillas si existen
-            if (strpos($value, '"') === 0 && substr($value, -1) === '"') {
-                $value = substr($value, 1, -1);
-            }
-
-            // Definir constante
-            if (!defined($name)) {
-                define($name, $value);
-            }
-        }
+        if (strpos(trim($line), '#') === 0 || strpos($line, '=') === false) continue;
+        list($key, $value) = explode('=', $line, 2);
+        $_ENV[trim($key)] = trim(trim($value), '"');
     }
 }
 
-// Solo aquí, después de cargar las variables, puedes imprimir sus valores
-echo "DB_HOST: " . DB_HOST . "<br>";
-echo "SITE_URL: " . SITE_URL . "<br>";
-echo "MAIL_HOST: " . MAIL_HOST . "<br>";
-echo "JWT_SECRET: " . JWT_SECRET . "<br>";
-
-// Verificar que las constantes necesarias estén definidas
-$requiredConstants = [
-    'DB_HOST',
-    'SITE_URL',
-    'MAIL_HOST',
-    'JWT_SECRET', /* otras constantes */
-];
-
-foreach ($requiredConstants as $constant) {
-    if (!defined($constant)) {
-        die("Error: La constante '$constant' no está definida en el archivo .env");
-    }
+// Función para obtener variables de entorno
+function env($key)
+{
+    return $_ENV[$key] ?? null;
 }
-// Después de cargar y verificar, imprimir para depuración
-echo "DB_HOST: " . DB_HOST . "<br>";
-echo "SITE_URL: " . SITE_URL . "<br>";
+
+// Definir constantes
+define('DB_HOST', env('DB_HOST'));
+define('DB_USER', env('DB_USER'));
+define('DB_PASS', env('DB_PASS'));
+define('DB_NAME', env('DB_NAME'));
+define('DB_PORT', env('DB_PORT'));
+define('SITE_URL', env('SITE_URL'));
+define('APP_NAME', env('APP_NAME'));
+define('JWT_SECRET', env('JWT_SECRET'));
+define('JWT_EXPIRY', env('JWT_EXPIRY'));
 
 // Conexión a la base de datos
 function getDbConnection()
@@ -107,27 +83,119 @@ function generateJWT($user_id)
 function verifyJWT($token)
 {
     $parts = explode('.', $token);
-    if (count($parts) != 3) {
-        return false;
-    }
+    if (count($parts) != 3) return false;
 
     list($header, $payload, $signature) = $parts;
-
     $verifySignature = base64_encode(hash_hmac('sha256', "$header.$payload", JWT_SECRET, true));
 
-    if ($signature !== $verifySignature) {
-        return false;
-    }
+    if ($signature !== $verifySignature) return false;
 
     $payload = json_decode(base64_decode($payload), true);
-
-    if ($payload['exp'] < time()) {
-        return false;
-    }
+    if ($payload['exp'] < time()) return false;
 
     return $payload;
 }
 
+// Función para validar autenticación
+function authenticateUser()
+{
+    // Obtener el encabezado de autorización
+    $headers = null;
+    if (isset($_SERVER['Authorization'])) {
+        $headers = trim($_SERVER['Authorization']);
+    } else if (isset($_SERVER['HTTP_AUTHORIZATION'])) {
+        $headers = trim($_SERVER['HTTP_AUTHORIZATION']);
+    } else if (function_exists('apache_request_headers')) {
+        $requestHeaders = apache_request_headers();
+        $requestHeaders = array_combine(
+            array_map('ucwords', array_keys($requestHeaders)),
+            array_values($requestHeaders)
+        );
+        if (isset($requestHeaders['Authorization'])) {
+            $headers = trim($requestHeaders['Authorization']);
+        }
+    }
+
+    // Extraer el token
+    $token = null;
+    if (!empty($headers) && preg_match('/Bearer\s(\S+)/', $headers, $matches)) {
+        $token = $matches[1];
+    }
+
+    if (!$token) {
+        header('Content-Type: application/json');
+        http_response_code(401);
+        echo json_encode(['error' => 'Token de autenticación no proporcionado', 'code' => 'token_missing']);
+        exit;
+    }
+
+    // Verificar token JWT
+    $payload = verifyJWT($token);
+    if (!$payload) {
+        header('Content-Type: application/json');
+        http_response_code(401);
+        echo json_encode(['error' => 'Token inválido o expirado', 'code' => 'token_invalid']);
+        exit;
+    }
+
+    // Verificar si el token está activo en la base de datos
+    $conn = getDbConnection();
+    $stmt = $conn->prepare("
+        SELECT t.id, t.activo, l.inicio_sesion, l.duracion_horas
+        FROM tokens t 
+        JOIN logins l ON t.id = l.token_id 
+        WHERE t.usuario_id = ? AND t.activo = 1 
+        AND l.inicio_sesion > DATE_SUB(NOW(), INTERVAL l.duracion_horas HOUR)
+    ");
+
+    $stmt->bind_param("i", $payload['user_id']);
+    $stmt->execute();
+    $result = $stmt->get_result();
+
+    if ($result->num_rows === 0) {
+        $stmt->close();
+        $conn->close();
+        header('Content-Type: application/json');
+        http_response_code(401);
+        echo json_encode([
+            'error' => 'Sesión inválida o expirada',
+            'code' => 'session_expired',
+            'message' => 'Tu sesión ha expirado. Por favor, inicia sesión nuevamente.'
+        ]);
+        exit;
+    }
+
+    // Obtener información de la sesión
+    $sessionInfo = $result->fetch_assoc();
+
+    $stmt->close();
+    $conn->close();
+
+    return [
+        'user_id' => $payload['user_id'],
+        'token_id' => $sessionInfo['id']
+    ];
+}
+
+// Función para cerrar sesión (invalidar token)
+function logout($tokenId = null)
+{
+    if (!$tokenId) {
+        $auth = authenticateUser();
+        $tokenId = $auth['token_id'];
+    }
+
+    $conn = getDbConnection();
+    $stmt = $conn->prepare("UPDATE tokens SET activo = 0 WHERE id = ?");
+    $stmt->bind_param("i", $tokenId);
+    $result = $stmt->execute();
+
+    $stmt->close();
+    $conn->close();
+
+    return $result;
+}
+// Función simple para enviar correos (versión mínima)
 // Función para enviar correos con PHPMailer
 function sendVerificationEmail($email, $token)
 {
@@ -147,7 +215,7 @@ function sendVerificationEmail($email, $token)
         }
     }
 
-    // Si no se encuentra el autoloader, usar función mail() nativa
+    // Si no se encuentra el autoloader o PHPMailer, usar función mail() nativa
     if (!$autoloaderFound || !class_exists('PHPMailer\PHPMailer\PHPMailer')) {
         // Método alternativo usando mail() nativo
         $subject = "Verificación de cuenta";
@@ -159,7 +227,7 @@ function sendVerificationEmail($email, $token)
         $message .= "Este enlace expirará en 24 horas.\n\n";
         $message .= "Saludos,\nEl equipo de " . APP_NAME;
 
-        $headers = "From: " . MAIL_FROM . "\r\n";
+        $headers = "From: no-reply@" . parse_url(SITE_URL, PHP_URL_HOST) . "\r\n";
 
         return mail($email, $subject, $message, $headers);
     }
@@ -168,26 +236,19 @@ function sendVerificationEmail($email, $token)
     try {
         $mail = new PHPMailer\PHPMailer\PHPMailer(true);
 
-        // Configuración del servidor con los valores del archivo de configuración
+        // Configuración del servidor
         $mail->isSMTP();
-        $mail->Host       = MAIL_HOST;
+        $mail->Host       = env('MAIL_HOST');
         $mail->SMTPAuth   = true;
-        $mail->Username   = MAIL_USERNAME;
-        $mail->Password   = MAIL_PASSWORD;
-
-        if (MAIL_ENCRYPTION === 'ssl') {
-            $mail->SMTPSecure = PHPMailer\PHPMailer\PHPMailer::ENCRYPTION_SMTPS;
-        } else {
-            $mail->SMTPSecure = PHPMailer\PHPMailer\PHPMailer::ENCRYPTION_STARTTLS;
-        }
-
-        $mail->Port       = MAIL_PORT;
-
-        // Debug (comenta esta línea en producción)
-        // $mail->SMTPDebug = PHPMailer\PHPMailer\SMTP::DEBUG_SERVER;
+        $mail->Username   = env('MAIL_USERNAME');
+        $mail->Password   = env('MAIL_PASSWORD');
+        $mail->SMTPSecure = env('MAIL_ENCRYPTION') === 'ssl'
+            ? PHPMailer\PHPMailer\PHPMailer::ENCRYPTION_SMTPS
+            : PHPMailer\PHPMailer\PHPMailer::ENCRYPTION_STARTTLS;
+        $mail->Port       = env('MAIL_PORT');
 
         // Remitentes y destinatarios
-        $mail->setFrom(MAIL_FROM, APP_NAME);
+        $mail->setFrom(env('MAIL_FROM'), APP_NAME);
         $mail->addAddress($email);
 
         // Contenido
@@ -224,80 +285,11 @@ function sendVerificationEmail($email, $token)
         return true;
     } catch (Exception $e) {
         error_log("Error al enviar correo: {$e->getMessage()}");
-        return false;
+        // Si PHPMailer falla, intentar con mail() nativo
+        $subject = "Verificación de cuenta";
+        $verificationLink = SITE_URL . "/register.php?token=" . $token;
+        $message = "Hola,\n\nGracias por registrarte. Por favor, verifica tu cuenta haciendo clic en el siguiente enlace:\n$verificationLink\n\nEste enlace expirará en 24 horas.\n\nSaludos,\nEl equipo de " . APP_NAME;
+        $headers = "From: no-reply@" . parse_url(SITE_URL, PHP_URL_HOST) . "\r\n";
+        return mail($email, $subject, $message, $headers);
     }
-}
-
-// Función para validar autenticación
-function authenticateUser()
-{
-    // Obtener el encabezado de autorización
-    $headers = null;
-    if (isset($_SERVER['Authorization'])) {
-        $headers = trim($_SERVER['Authorization']);
-    } else if (isset($_SERVER['HTTP_AUTHORIZATION'])) {
-        $headers = trim($_SERVER['HTTP_AUTHORIZATION']);
-    } else if (function_exists('apache_request_headers')) {
-        $requestHeaders = apache_request_headers();
-        $requestHeaders = array_combine(
-            array_map('ucwords', array_keys($requestHeaders)),
-            array_values($requestHeaders)
-        );
-        if (isset($requestHeaders['Authorization'])) {
-            $headers = trim($requestHeaders['Authorization']);
-        }
-    }
-
-    // Extraer el token
-    $token = null;
-    if (!empty($headers)) {
-        if (preg_match('/Bearer\s(\S+)/', $headers, $matches)) {
-            $token = $matches[1];
-        }
-    }
-
-    if (!$token) {
-        header('Content-Type: application/json');
-        http_response_code(401);
-        echo json_encode(['error' => 'Token de autenticación no proporcionado']);
-        exit;
-    }
-
-    // Verificar token
-    $payload = verifyJWT($token);
-
-    if (!$payload) {
-        header('Content-Type: application/json');
-        http_response_code(401);
-        echo json_encode(['error' => 'Token inválido o expirado']);
-        exit;
-    }
-
-    // Verificar si el token está activo en la base de datos
-    $conn = getDbConnection();
-    $stmt = $conn->prepare("
-        SELECT t.id, ua.activo 
-        FROM tokens t 
-        JOIN usuario_activo ua ON t.id = ua.id 
-        WHERE t.usuario_id = ? AND ua.activo = 1 AND t.fecha_creacion > DATE_SUB(NOW(), INTERVAL t.duracion HOUR)
-    ");
-
-    $stmt->bind_param("i", $payload['user_id']);
-    $stmt->execute();
-    $result = $stmt->get_result();
-
-    if ($result->num_rows === 0) {
-        $stmt->close();
-        $conn->close();
-
-        header('Content-Type: application/json');
-        http_response_code(401);
-        echo json_encode(['error' => 'Sesión inválida o expirada']);
-        exit;
-    }
-
-    $stmt->close();
-    $conn->close();
-
-    return $payload['user_id'];
 }

@@ -17,7 +17,7 @@ function registerUser()
     $data = json_decode(file_get_contents('php://input'), true);
 
     // Verificar que todos los campos necesarios estén presentes
-    $requiredFields = ['nombre', 'correo', 'password', 'confirm_password', 'ciudad'];
+    $requiredFields = ['nombre', 'email', 'password', 'confirm_password', 'ciudad'];
     foreach ($requiredFields as $field) {
         if (!isset($data[$field]) || empty($data[$field])) {
             http_response_code(400);
@@ -34,7 +34,7 @@ function registerUser()
     }
 
     // Verificar formato de correo electrónico
-    if (!filter_var($data['correo'], FILTER_VALIDATE_EMAIL)) {
+    if (!filter_var($data['email'], FILTER_VALIDATE_EMAIL)) {
         http_response_code(400);
         echo json_encode(['error' => 'Formato de correo electrónico inválido']);
         exit;
@@ -44,8 +44,8 @@ function registerUser()
     $conn = getDbConnection();
 
     // Verificar si el correo ya está registrado
-    $stmt = $conn->prepare("SELECT id FROM usuario WHERE correo = ?");
-    $stmt->bind_param("s", $data['correo']);
+    $stmt = $conn->prepare("SELECT id FROM usuarios WHERE email = ?");
+    $stmt->bind_param("s", $data['email']);
     $stmt->execute();
     $result = $stmt->get_result();
 
@@ -64,20 +64,20 @@ function registerUser()
     $verificationToken = bin2hex(random_bytes(32));
 
     // Insertar nuevo usuario con estado pendiente de verificación
-    $stmt = $conn->prepare("INSERT INTO usuario (nombre, correo, password, ciudad, verificado, token_verificacion) VALUES (?, ?, ?, ?, 0, ?)");
-    $stmt->bind_param("sssss", $data['nombre'], $data['correo'], $passwordHash, $data['ciudad'], $verificationToken);
+    $stmt = $conn->prepare("INSERT INTO usuarios (nombre, email, password, ciudad, status, token_verificacion) VALUES (?, ?, ?, ?, 'pending', ?)");
+    $stmt->bind_param("sssss", $data['nombre'], $data['email'], $passwordHash, $data['ciudad'], $verificationToken);
 
     if ($stmt->execute()) {
         // Enviar correo de verificación
-        if (sendVerificationEmail($data['correo'], $verificationToken)) {
+        if (function_exists('sendVerificationEmail') && sendVerificationEmail($data['email'], $verificationToken)) {
             http_response_code(201);
             echo json_encode([
                 'message' => 'Usuario registrado correctamente. Se ha enviado un correo de verificación.'
             ]);
         } else {
-            http_response_code(500);
+            http_response_code(201);
             echo json_encode([
-                'message' => 'Usuario registrado, pero hubo un problema al enviar el correo de verificación.'
+                'message' => 'Usuario registrado correctamente. La verificación por correo no está disponible en este momento.'
             ]);
         }
     } else {
@@ -105,7 +105,7 @@ function verifyEmail()
     $conn = getDbConnection();
 
     // Buscar usuario con este token de verificación
-    $stmt = $conn->prepare("SELECT id FROM usuario WHERE token_verificacion = ? AND verificado = 0");
+    $stmt = $conn->prepare("SELECT id FROM usuarios WHERE token_verificacion = ? AND status = 'pending'");
     $stmt->bind_param("s", $token);
     $stmt->execute();
     $result = $stmt->get_result();
@@ -121,8 +121,8 @@ function verifyEmail()
     $user = $result->fetch_assoc();
     $userId = $user['id'];
 
-    // Actualizar el estado del usuario a verificado
-    $updateStmt = $conn->prepare("UPDATE usuario SET verificado = 1, token_verificacion = NULL WHERE id = ?");
+    // Actualizar el estado del usuario a activo
+    $updateStmt = $conn->prepare("UPDATE usuarios SET status = 'active', token_verificacion = NULL WHERE id = ?");
     $updateStmt->bind_param("i", $userId);
 
     if ($updateStmt->execute()) {
@@ -165,4 +165,3 @@ if (isset($_GET['token'])) {
     // Si no, se trata de un registro de usuario
     registerUser();
 }
-?>
