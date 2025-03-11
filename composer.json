@@ -1,0 +1,17 @@
+{
+    "name": "richard/auth-jwt",
+    "autoload": {
+        "psr-4": {
+            "Richard\\AuthJwt\\": "src/"
+        }
+    },
+    "authors": [
+        {
+            "name": "Richard",
+            "email": "ricky201325@gmail.com"
+        }
+    ],
+    "require": {
+        "phpmailer/phpmailer": "^6.9"
+    }
+}
