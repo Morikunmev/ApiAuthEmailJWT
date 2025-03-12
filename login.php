@@ -86,12 +86,12 @@ $tokenStmt->execute();
 $tokenId = $conn->insert_id;
 
 // Capturar información adicional sobre el login
-$ipAddress = $_SERVER['REMOTE_ADDR'] ?? null;
 $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? null;
 
 // Insertar en la tabla logins
-$loginStmt = $conn->prepare("INSERT INTO logins (token_id, inicio_sesion, duracion_horas, ip_address, user_agent) VALUES (?, NOW(), ?, ?, ?)");
-$loginStmt->bind_param("iiss", $tokenId, $duracion, $ipAddress, $userAgent);
+$loginStmt = $conn->prepare("INSERT INTO logins (token_id, inicio_sesion, duracion_horas, user_agent) VALUES (?, NOW(), ?, ?)");
+
+$loginStmt->bind_param("iis", $tokenId, $duracion, $userAgent);
 $loginStmt->execute();
 
 $tokenStmt->close();
